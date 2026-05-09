@@ -96,6 +96,7 @@ function getRedirectUri(request: NextRequest, platform: string): string {
  */
 function getBaseUrl(request: NextRequest): string {
   if (process.env.APP_BASE_URL) return process.env.APP_BASE_URL;
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
   const { origin } = new URL(request.url);
   return origin;
 }

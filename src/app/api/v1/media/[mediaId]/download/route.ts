@@ -3,8 +3,14 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 
-export async function DELETE(
-  request: NextRequest,
+/**
+ * GET /api/v1/media/[mediaId]/download
+ * Proxies the file from Supabase Storage so it can be downloaded
+ * with Content-Disposition: attachment (forces browser download).
+ * Uses admin client for storage access (handles private buckets).
+ */
+export async function GET(
+  _request: NextRequest,
   { params }: { params: Promise<{ mediaId: string }> }
 ): Promise<NextResponse> {
   try {
@@ -33,6 +39,7 @@ export async function DELETE(
     const {
       data: { user },
     } = await supabase.auth.getUser();
+
     if (!user) {
       return NextResponse.json(
         { success: false, error: { code: "UNAUTHORIZED", message: "Not authenticated" } },
@@ -40,10 +47,10 @@ export async function DELETE(
       );
     }
 
-    // --- Admin client for DB + Storage ---
+    // --- Admin client for DB + Storage access ---
     const admin = createAdminClient();
 
-    // Get media row to verify ownership and get storage path
+    // Get media row — verify ownership
     const { data: mediaRow, error: fetchError } = await admin
       .from("user_media")
       .select("*")
@@ -58,44 +65,40 @@ export async function DELETE(
       );
     }
 
-    // Delete from Supabase Storage (using admin to bypass bucket policies)
-    const { error: storageError } = await admin.storage
+    // Download from Supabase Storage using admin (bypasses RLS)
+    const { data: fileData, error: downloadError } = await admin.storage
       .from("post-media")
-      .remove([mediaRow.storage_path]);
+      .download(mediaRow.storage_path);
 
-    if (storageError) {
-      console.error("Storage delete error:", storageError);
-      // Continue even if storage delete fails — still remove DB row
-    }
-
-    // Delete from database
-    const { error: dbError } = await admin
-      .from("user_media")
-      .delete()
-      .eq("id", mediaId)
-      .eq("user_id", user.id);
-
-    if (dbError) {
+    if (downloadError || !fileData) {
+      console.error("Storage download error:", downloadError);
       return NextResponse.json(
         {
           success: false,
-          error: { code: "DELETE_ERROR", message: "Failed to delete media" },
+          error: {
+            code: "DOWNLOAD_ERROR",
+            message: downloadError?.message ?? "Could not download file from storage",
+          },
         },
         { status: 500 }
       );
     }
 
-    return NextResponse.json({
-      success: true,
-      data: { mediaId },
+    const arrayBuffer = await fileData.arrayBuffer();
+    const fileName = mediaRow.file_name || "download";
+
+    return new NextResponse(arrayBuffer, {
+      status: 200,
+      headers: {
+        "Content-Type": mediaRow.mime_type || "application/octet-stream",
+        "Content-Disposition": `attachment; filename="${fileName}"`,
+        "Content-Length": String(arrayBuffer.byteLength),
+      },
     });
   } catch (error) {
-    console.error("DELETE /api/v1/media/[mediaId]:", error);
+    console.error("GET /api/v1/media/[mediaId]/download:", error);
     return NextResponse.json(
-      {
-        success: false,
-        error: { code: "INTERNAL_ERROR", message: "Internal server error" },
-      },
+      { success: false, error: { code: "INTERNAL_ERROR", message: "Internal server error" } },
       { status: 500 }
     );
   }
